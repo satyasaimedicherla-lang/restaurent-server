@@ -9,7 +9,8 @@ import os
 # Get the directory of the script
 basedir = os.path.abspath(os.path.dirname(__file__))
 
-app = Flask(__name__, template_folder="templates")
+# Change "templates" to "." to look in the current directory
+app = Flask(__name__, template_folder=".")
 CORS(app)
 
 # Use a path relative to the script directory for the database
@@ -125,3 +126,4 @@ if __name__ == '__main__':
         db.create_all()
     app.run(host='0.0.0.0', port=5000, debug=True)
     
+
