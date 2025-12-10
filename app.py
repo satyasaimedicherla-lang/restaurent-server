@@ -1,15 +1,20 @@
-from flask import Flask, request, jsonify
+# server.py
+from flask import Flask, request, jsonify, render_template
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
-from datetime import datetime
+import datetime
 import pandas as pd
 import os
 
-app = Flask(__name__)
+# Get the directory of the script
+basedir = os.path.abspath(os.path.dirname(__file__))
+
+app = Flask(__name__, template_folder="templates")
 CORS(app)
 
-# Database Config
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///database.db'
+# Use a path relative to the script directory for the database
+db_path = os.path.join(basedir, 'database.db')
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + db_path
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
@@ -18,111 +23,105 @@ class CallLog(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     table_id = db.Column(db.Integer, nullable=False)
     event = db.Column(db.String(50), nullable=False)
-    timestamp = db.Column(db.DateTime, default=datetime.now, nullable=False)
-
-# --- Analytics Logic ---
-def calculate_analytics(logs_df):
-    if logs_df.empty:
-        return {
-            'total': "0", 'open': "0", 'avg_resp': "0.0", 'avg_dlv': "0.0",
-            'hourly': {i: 0 for i in range(24)}, 'closed': 0
-        }
-
-    logs_df['timestamp'] = pd.to_datetime(logs_df['timestamp'])
-    
-    total = 0
-    closed_req = 0
-    resp_times = []
-    dlv_times = []
-    hourly = {i: 0 for i in range(24)}
-    
-    tables = logs_df.groupby('table_id')
-    
-    for tid, group in tables:
-        events = group.sort_values('timestamp').to_dict('records')
-        call_start = None
-        
-        for e in events:
-            evt = e['event']
-            ts = e['timestamp']
-            
-            if evt == "Customer_Called":
-                total += 1
-                call_start = ts
-                h = ts.hour
-                hourly[h] = hourly.get(h, 0) + 1
-            elif evt == "Waiter_Responded" and call_start:
-                diff = (ts - call_start).total_seconds() / 60
-                resp_times.append(diff)
-            elif (evt == "Food_Delivered" or "Bill" in evt) and call_start:
-                diff = (ts - call_start).total_seconds() / 60
-                dlv_times.append(diff)
-                call_start = None
-                closed_req += 1
-
-    avg_resp = sum(resp_times)/len(resp_times) if resp_times else 0
-    avg_dlv = sum(dlv_times)/len(dlv_times) if dlv_times else 0
-
-    return {
-        'total': str(total),
-        'open': str(total - closed_req),
-        'closed': closed_req,
-        'avg_resp': f"{avg_resp:.1f}",
-        'avg_dlv': f"{avg_dlv:.1f}",
-        'hourly': hourly
-    }
-
-@app.route('/', methods=['GET'])
-def home():
-    return "Server is Running!", 200
+    # Use server timestamp as the primary source of truth
+    timestamp = db.Column(db.DateTime, default=datetime.datetime.now)
+    # Store client time if provided
+    client_time_str = db.Column(db.String(20), nullable=True)
 
 @app.route('/log', methods=['POST', 'GET'])
 def log_data():
-    data = request.get_json(silent=True) or request.args
-    table_id = data.get('tableId') or data.get('table')
-    event = data.get('event')
+    # Accept JSON POST first
+    data = request.get_json(silent=True)
+    if data:
+        table_id = data.get('tableId') or data.get('table')
+        event = data.get('event')
+        time_str = data.get('time') # This is the client time
+    else:
+        # fallback to GET query params
+        table_id = request.args.get('table') or request.args.get('tableId')
+        event = request.args.get('event')
+        time_str = request.args.get('time')
 
     if not table_id or not event:
-        return jsonify({"status": "error"}), 400
+        return jsonify({"status": "error", "message": "Missing table or event"}), 400
 
-    entry = CallLog(table_id=int(table_id), event=event)
+    try:
+        table_id = int(table_id)
+    except:
+        return jsonify({"status":"error", "message":"table must be int"}), 400
+
+    # We use the server's time for the database timestamp
+    # but store the client's reported time for reference
+    entry = CallLog(table_id=table_id, event=event, client_time_str=time_str)
+
     db.session.add(entry)
     db.session.commit()
-    return jsonify({"status": "success"}), 200
+
+    # also append to events.csv
+    csv_path = os.path.join(basedir, 'events.csv')
+    try:
+        with open(csv_path, "a") as f:
+            f.write(f"{entry.table_id},{entry.event},{entry.timestamp.isoformat()}\n")
+    except Exception as e:
+        print(f"Error writing to CSV: {e}")
+
+
+    print(f"Data logged: Table {entry.table_id}, Event: {entry.event}, Time: {entry.timestamp}")
+    return jsonify({"status": "success", "message": "Data logged"}), 200
 
 @app.route('/data')
-def get_data():
+def get_all_data():
     try:
-        logs_df = pd.read_sql_table('call_log', db.engine)
-        analytics = calculate_analytics(logs_df)
-    except Exception as e:
-        print(f"Error: {e}")
-        logs_df = pd.DataFrame()
-        analytics = calculate_analytics(logs_df)
+        # Query the database
+        logs = CallLog.query.all()
+        # Convert to list of dictionaries
+        records = [
+            {
+                'id': log.id,
+                'table_id': log.table_id,
+                'event': log.event,
+                'timestamp': log.timestamp.isoformat() # Use ISO format for JS
+            } for log in logs
+        ]
+        
+        if not records:
+            return jsonify({'records': [], 'live_status': []})
 
-    live_status = []
-    if not logs_df.empty:
-        latest = logs_df.sort_values('timestamp').drop_duplicates(subset='table_id', keep='last')
-        now = datetime.now()
-        for _, r in latest.iterrows():
-            last_event = r['event']
-            status_display = last_event
-            if last_event in ['Food_Delivered', 'Table_Closed 💰 Bill']:
-                status_display = "Idle"
-            
-            last_time = r['timestamp'].to_pydatetime()
-            minutes_ago = int((now - last_time).total_seconds() / 60)
-            
+        # --- Calculate Live Status ---
+        # Group by table_id and find the latest event for each
+        latest_events = {}
+        for r in records:
+            tbl_id = r['table_id']
+            if tbl_id not in latest_events or r['timestamp'] > latest_events[tbl_id]['timestamp']:
+                latest_events[tbl_id] = r
+
+        live_status = []
+        now = datetime.datetime.now()
+        
+        for table_id, r in latest_events.items():
+            event_time = datetime.datetime.fromisoformat(r['timestamp'])
+            minutes_ago = int((now - event_time).total_seconds() / 60)
             live_status.append({
                 'table_id': int(r['table_id']),
-                'status': status_display,
+                'event': r['event'],
                 'minutes_ago': minutes_ago
             })
             
-    return jsonify({'analytics': analytics, 'live_status': live_status})
+        return jsonify({'records': records, 'live_status': live_status})
+        
+    except Exception as e:
+        print(f"Error in /data: {e}")
+        # Fallback in case db is locked or table doesn't exist yet
+        return jsonify({'records': [], 'live_status': []})
 
-# Initialize DB
-with app.app_context():
-    db.create_all()
 
-# Gunicorn runs this directly, no need for if name == main logic for cloud
+@app.route('/')
+def index():
+    # FIX: Render main.html instead of dashboard.html
+    return render_template('main.html')
+
+if __name__ == '__main__':
+    with app.app_context():
+        db.create_all()
+    app.run(host='0.0.0.0', port=5000, debug=True)
+    
