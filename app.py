@@ -20,37 +20,39 @@ class CallLog(db.Model):
     event = db.Column(db.String(50), nullable=False)
     timestamp = db.Column(db.DateTime, default=datetime.now, nullable=False)
 
-# --- Analytics Logic ---
+# --- Global Analytics Logic ---
 def calculate_analytics(logs_df):
     if logs_df.empty:
         return {
             'total': "0", 'open': "0", 'avg_resp': "0.0", 'avg_dlv': "0.0",
-            'hourly': {str(i): 0 for i in range(24)}, 'closed': 0
+            'hourly': {i: 0 for i in range(24)}, 'closed': 0
         }
 
-    logs_df['timestamp'] = pd.to_datetime(logs_df['timestamp'])
-
+    # FIX: Create a copy to avoid SettingWithCopyWarning
+    df = logs_df.copy()
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    
     total = 0
     closed_req = 0
     resp_times = []
     dlv_times = []
-    hourly = {str(i): 0 for i in range(24)}
-
-    tables = logs_df.groupby('table_id')
-
+    hourly = {i: 0 for i in range(24)}
+    
+    tables = df.groupby('table_id')
+    
     for tid, group in tables:
         events = group.sort_values('timestamp').to_dict('records')
         call_start = None
-
+        
         for e in events:
             evt = e['event']
             ts = e['timestamp']
-
+            
             if evt == "Customer_Called":
                 total += 1
                 call_start = ts
                 h = ts.hour
-                hourly[str(h)] = hourly.get(str(h), 0) + 1
+                hourly[h] = hourly.get(h, 0) + 1
             elif evt == "Waiter_Responded" and call_start:
                 diff = (ts - call_start).total_seconds() / 60
                 resp_times.append(diff)
@@ -60,8 +62,8 @@ def calculate_analytics(logs_df):
                 call_start = None
                 closed_req += 1
 
-    avg_resp = sum(resp_times) / len(resp_times) if resp_times else 0
-    avg_dlv = sum(dlv_times) / len(dlv_times) if dlv_times else 0
+    avg_resp = sum(resp_times)/len(resp_times) if resp_times else 0
+    avg_dlv = sum(dlv_times)/len(dlv_times) if dlv_times else 0
 
     return {
         'total': str(total),
@@ -72,9 +74,50 @@ def calculate_analytics(logs_df):
         'hourly': hourly
     }
 
+# --- Per-Table Analytics Logic ---
+def get_table_analytics(logs_df, table_id):
+    if logs_df.empty:
+        return {"available": "Yes", "orders_received": "0", "orders_responded": "0", "orders_delivered": "0"}
+
+    # FIX: Create a copy here too
+    df = logs_df.copy()
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+    # Filter for this specific table
+    table_events = df[df['table_id'] == table_id].sort_values('timestamp')
+    
+    if table_events.empty:
+        return {"available": "Yes", "orders_received": "0", "orders_responded": "0", "orders_delivered": "0"}
+
+    orders_received = 0
+    orders_responded = 0
+    orders_delivered = 0
+    
+    for _, row in table_events.iterrows():
+        evt = row['event']
+        if evt == "Customer_Called":
+            orders_received += 1
+        elif evt == "Waiter_Responded":
+            orders_responded += 1
+        elif "Food_Delivered" in evt or "Bill" in evt:
+            orders_delivered += 1
+
+    # Check availability (based on last event)
+    last_event = table_events.iloc[-1]['event']
+    is_available = "Yes"
+    if last_event in ["Customer_Called", "Waiter_Responded"]:
+        is_available = "No"
+
+    return {
+        "available": is_available,
+        "orders_received": str(orders_received),
+        "orders_responded": str(orders_responded),
+        "orders_delivered": str(orders_delivered)
+    }
+
 @app.route('/', methods=['GET'])
 def home():
-    return "Server is Running!", 200
+    return "SmartOps Server is Running!", 200
 
 @app.route('/log', methods=['POST', 'GET'])
 def log_data():
@@ -85,21 +128,14 @@ def log_data():
     if not table_id or not event:
         return jsonify({"status": "error"}), 400
 
-    try:
-        table_id = int(table_id)
-    except Exception:
-        return jsonify({"status": "invalid_table_id"}), 400
-
-    entry = CallLog(table_id=table_id, event=event)
+    entry = CallLog(table_id=int(table_id), event=event)
     db.session.add(entry)
     db.session.commit()
+    print(f"LOGGED: Table {table_id} - {event}")
     return jsonify({"status": "success"}), 200
 
 @app.route('/data')
 def get_data():
-    """
-    Main endpoint for dashboard, returns overall analytics and latest per-table status
-    """
     try:
         logs_df = pd.read_sql_table('call_log', db.engine)
         analytics = calculate_analytics(logs_df)
@@ -110,61 +146,39 @@ def get_data():
 
     live_status = []
     if not logs_df.empty:
-        latest = logs_df.sort_values('timestamp').drop_duplicates(subset='table_id', keep='last')
+        # FIX: Copy for live status calculation as well
+        df = logs_df.copy()
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        
+        latest = df.sort_values('timestamp').drop_duplicates(subset='table_id', keep='last')
         now = datetime.now()
         for _, r in latest.iterrows():
             last_event = r['event']
             status_display = last_event
             if last_event in ['Food_Delivered', 'Table_Closed 💰 Bill']:
                 status_display = "Idle"
-
-            last_time = r['timestamp']
-            if hasattr(last_time, "to_pydatetime"):
-                last_time = last_time.to_pydatetime()
+            
+            last_time = r['timestamp'].to_pydatetime()
             minutes_ago = int((now - last_time).total_seconds() / 60)
-
+            
             live_status.append({
                 'table_id': int(r['table_id']),
                 'status': status_display,
                 'minutes_ago': minutes_ago
             })
-
+            
     return jsonify({'analytics': analytics, 'live_status': live_status})
 
-@app.route('/table/<int:table_id>/data', methods=['GET'])
+@app.route('/table/<int:table_id>/data')
 def get_table_data(table_id):
-    """
-    Return only the logs and analytics for a specific table, so data is separated per-table.
-    """
     try:
         logs_df = pd.read_sql_table('call_log', db.engine)
-        table_logs = logs_df[logs_df['table_id'] == table_id]
-        analytics = calculate_analytics(table_logs)
+        # We pass the raw df, the function inside will copy it
+        stats = get_table_analytics(logs_df, table_id)
+        return jsonify({'status': 'success', 'stats': stats}), 200
     except Exception as e:
-        print(f"Error: {e}")
-        analytics = calculate_analytics(pd.DataFrame())
-        table_logs = pd.DataFrame()
-
-    # latest status for the table
-    live_status = []
-    if not table_logs.empty:
-        event_row = table_logs.sort_values('timestamp').iloc[-1]
-        last_event = event_row['event']
-        status_display = last_event
-        if last_event in ['Food_Delivered', 'Table_Closed 💰 Bill']:
-            status_display = "Idle"
-        last_time = event_row['timestamp']
-        if hasattr(last_time, "to_pydatetime"):
-            last_time = last_time.to_pydatetime()
-        minutes_ago = int((datetime.now() - last_time).total_seconds() / 60)
-        live_status.append({
-            'table_id': int(event_row['table_id']),
-            'status': status_display,
-            'minutes_ago': minutes_ago
-        })
-
-    # include analytics and the live status for this table only
-    return jsonify({'analytics': analytics, 'live_status': live_status})
+        print(f"Error fetching table data: {e}")
+        return jsonify({'status': 'error', 'stats': {}}), 500
 
 # Initialize DB
 with app.app_context():
