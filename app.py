@@ -1,7 +1,7 @@
+import os
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
-from waitress import serve
 from datetime import datetime
 import pandas as pd
 
@@ -36,7 +36,6 @@ def calculate_analytics(logs_df):
     dlv_times = []
     hourly = {i: 0 for i in range(24)}
     
-    # Process per table
     tables = logs_df.groupby('table_id')
     
     for tid, group in tables:
@@ -73,6 +72,10 @@ def calculate_analytics(logs_df):
         'hourly': hourly
     }
 
+@app.route('/', methods=['GET'])
+def home():
+    return "Server is Running!", 200
+
 @app.route('/log', methods=['POST', 'GET'])
 def log_data():
     data = request.get_json(silent=True) or request.args
@@ -93,18 +96,16 @@ def get_data():
         logs_df = pd.read_sql_table('call_log', db.engine)
         analytics = calculate_analytics(logs_df)
     except Exception as e:
-        print(e)
+        print(f"Error: {e}")
         logs_df = pd.DataFrame()
         analytics = calculate_analytics(logs_df)
 
-    # Live Status Calculation
     live_status = []
     if not logs_df.empty:
         latest = logs_df.sort_values('timestamp').drop_duplicates(subset='table_id', keep='last')
         now = datetime.now()
         for _, r in latest.iterrows():
             last_event = r['event']
-            # Determine if table is effectively idle
             status_display = last_event
             if last_event in ['Food_Delivered', 'Table_Closed 💰 Bill']:
                 status_display = "Idle"
@@ -120,9 +121,9 @@ def get_data():
             
     return jsonify({'analytics': analytics, 'live_status': live_status})
 
+# Initialize DB
+with app.app_context():
+    db.create_all()
+
 if __name__ == "__main__":
-    with app.app_context():
-        db.create_all()
-    print("--- SERVER RUNNING ---")
-    print("Use 'ipconfig' (Windows) to find your IPv4 Address.")
-    serve(app, host='0.0.0.0', port=5000, threads=6)
+    app.run(host='0.0.0.0', port=5000)
