@@ -1,339 +1,128 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Restaurant Service Dashboard</title>
-    
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background-color: #FFFDF6; /* Warm Cream */
-            margin: 0;
-            padding: 24px;
-            color: #3B2F2F; /* Rich Brown */
-        }
-        h1 { color: #B5A642; /* Olive Gold */ }
-        h3 { color: #3B2F2F; border-bottom: 2px solid #B5A642; padding-bottom: 8px; margin-top: 32px; }
+from flask import Flask, request, jsonify
+from flask_sqlalchemy import SQLAlchemy
+from flask_cors import CORS
+from waitress import serve
+from datetime import datetime
+import pandas as pd
 
-        /* KPI Section */
-        .kpi-section {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 24px;
-            margin-bottom: 32px;
-        }
-        .kpi-card {
-            background-color: #D8CFC4;
-            padding: 24px;
-            border-radius: 12px;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            border-left: 4px solid #B5A642;
-        }
-        .kpi-card h2 { margin: 0 0 8px 0; font-size: 14px; text-transform: uppercase; }
-        .kpi-card p { margin: 0; font-size: 32px; font-weight: bold; color: #B5A642; }
+app = Flask(__name__)
+CORS(app)
 
-        /* --- NEW: Enlarged Live Status Section --- */
-        .live-status-section { margin-bottom: 40px; }
-        .live-status-container {
-            display: grid;
-            /* Wider columns for bigger cards */
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); 
-            gap: 24px;
-            margin-top: 16px;
-        }
-        .live-status-card {
-            background-color: #D8CFC4;
-            padding: 32px; /* More padding */
-            border-radius: 16px;
-            box-shadow: 0 8px 12px rgba(0, 0, 0, 0.1);
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            min-height: 150px; /* Taller cards */
-            transition: transform 0.2s;
-        }
-        .live-status-card:hover { transform: translateY(-5px); }
-        .live-status-card h4 {
-            font-size: 2rem; /* Much larger font */
-            font-weight: bold;
-            margin: 0 0 12px 0;
-            color: #3B2F2F;
-        }
-        .live-status-card p.status-text {
-            font-size: 1.5rem; /* Larger status text */
-            font-weight: bold;
-            margin: 0 0 8px 0;
-        }
-        .live-status-card p.time-text { font-size: 1rem; color: #666; }
-        
-        /* Status Colors */
-        .live-status-card.idle { background-color: #e5e5e5; border-left: 8px solid #999; }
-        .live-status-card.called { background-color: #fef3c7; border-left: 8px solid #f59e0b; }
-        .live-status-card.called h4 { color: #b45309; }
-        .live-status-card.called .status-text { color: #d97706; }
-        .live-status-card.attended { background-color: #e0f2fe; border-left: 8px solid #0ea5e9; }
-        .live-status-card.attended h4 { color: #0369a1; }
-        .live-status-card.attended .status-text { color: #0ea5e9; }
+# Database Config
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///database.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db = SQLAlchemy(app)
 
-        /* --- Charts and Logs at the bottom --- */
-        .bottom-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 24px;
-            margin-bottom: 40px;
-        }
-        .chart-container {
-            background-color: #fff;
-            padding: 16px;
-            border-radius: 12px;
-            border: 1px solid #ddd;
-        }
-        @media (max-width: 768px) { .bottom-grid { grid-template-columns: 1fr; } }
+class CallLog(db.Model):
+    __tablename__ = 'call_log'
+    id = db.Column(db.Integer, primary_key=True)
+    table_id = db.Column(db.Integer, nullable=False)
+    event = db.Column(db.String(50), nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.now, nullable=False)
 
-        /* --- Individual Table Logs --- */
-        .individual-tables-section {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-            gap: 20px;
-            margin-bottom: 40px;
-        }
-        .table-history-card {
-            background: white;
-            padding: 16px;
-            border-radius: 8px;
-            border: 1px solid #B5A642;
-        }
-        .mini-table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 0.9rem;
-        }
-        .mini-table th, .mini-table td {
-            text-align: left;
-            padding: 8px;
-            border-bottom: 1px solid #eee;
-        }
-
-        /* Utils */
-        #real-time-clock { position: absolute; top: 24px; right: 24px; font-weight: bold; font-size: 1.2rem; }
-    </style>
-</head>
-<body>
-    <div id="real-time-clock"></div>
-    <h1>Restaurant Floor Monitor</h1>
-    <p>Live Dashboard. Updated: <span id="last-updated">--:--</span></p>
-
-    <div class="kpi-section">
-        <div class="kpi-card"><h2>Total Calls</h2><p id="total-calls">0</p></div>
-        <div class="kpi-card"><h2>Open Requests</h2><p id="open-requests">0</p></div>
-        <div class="kpi-card"><h2>Avg Respond (min)</h2><p id="avg-respond">0.0</p></div>
-        <div class="kpi-card"><h2>Avg Service (min)</h2><p id="avg-delivery">0.0</p></div>
-    </div>
-
-    <div class="live-status-section">
-        <h3>Live Floor Status</h3>
-        <div class="live-status-container" id="live-status-cards">
-            </div>
-    </div>
-
-    <h3>Individual Table History</h3>
-    <div class="individual-tables-section" id="individual-tables-container">
-        </div>
-
-    <h3>Analytics</h3>
-    <div class="bottom-grid">
-        <div class="chart-container"><h3>Calls per Hour</h3><canvas id="calls-per-hour-chart"></canvas></div>
-        <div class="chart-container"><h3>Request Status</h3><canvas id="request-status-chart"></canvas></div>
-    </div>
-
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script>
-    // =================================================================
-    // CONFIGURATION: PASTE YOUR RENDER URL HERE WHEN DEPLOYED
-    // If running locally with the C++ server on the same machine, use:
-    // const API_BASE_URL = ''; 
-    // If hosting HTML on your laptop but Server on Render, use:
-    // const API_BASE_URL = 'https://your-app-name.onrender.com';
-    // =================================================================
-    const API_BASE_URL = ''; 
-
-    let currentCharts = {};
-
-    function updateClock() {
-        const now = new Date();
-        document.getElementById('real-time-clock').textContent = now.toLocaleTimeString();
-        document.getElementById('last-updated').textContent = now.toLocaleTimeString();
-    }
-
-    function getStatusClass(event) {
-        if (event === 'Customer_Called') return 'called';
-        if (event === 'Waiter_Responded' || event === 'Food_Delivered') return 'attended';
-        return 'idle';
-    }
-
-    function processDataFromRecords(records) {
-        if (!records || records.length === 0) {
-            return {
-                total_calls: 0, open_requests: 0, avg_respond: 0.0, avg_delivery: 0.0,
-                calls_per_hour: {}, request_status: { open: 0, closed: 0 },
-                grouped_by_table: {} // For individual tables
-            };
-        }
-
-        let total_calls = 0;
-        const calls_per_hour = Array(24).fill(0).reduce((acc, val, i) => ({...acc, [i]: val }), {});
-        const respond_times = [];
-        const delivery_times = [];
-        
-        // Group by table
-        const grouped_by_table = {};
-
-        records.forEach(log => {
-            const date = new Date(log.timestamp);
-            if (!grouped_by_table[log.table_id]) grouped_by_table[log.table_id] = [];
-            
-            grouped_by_table[log.table_id].push({ ...log, jsDate: date });
-
-            // Logic for KPIs
-            if (log.event === 'Customer_Called') {
-                total_calls++;
-                calls_per_hour[date.getHours()]++;
-            }
-        });
-
-        // Calculate Times (Simplified logic)
-        let closed_requests = 0;
-        for (const tId in grouped_by_table) {
-            // Sort by time
-            grouped_by_table[tId].sort((a,b) => a.jsDate - b.jsDate);
-            
-            let call_time = null;
-            grouped_by_table[tId].forEach(ev => {
-                if(ev.event === 'Customer_Called') call_time = ev.jsDate;
-                else if(ev.event === 'Waiter_Responded' && call_time) {
-                    respond_times.push((ev.jsDate - call_time)/60000);
-                }
-                else if(ev.event === 'Food_Delivered' && call_time) {
-                    closed_requests++;
-                    delivery_times.push((ev.jsDate - call_time)/60000);
-                    call_time = null;
-                }
-            });
-        }
-
-        const open_requests = total_calls - closed_requests;
-        const avg_resp = respond_times.length ? (respond_times.reduce((a,b)=>a+b,0)/respond_times.length) : 0;
-        const avg_del = delivery_times.length ? (delivery_times.reduce((a,b)=>a+b,0)/delivery_times.length) : 0;
-
+# --- Analytics Logic ---
+def calculate_analytics(logs_df):
+    if logs_df.empty:
         return {
-            total_calls, open_requests, 
-            avg_respond: avg_resp.toFixed(2), avg_delivery: avg_del.toFixed(2),
-            calls_per_hour, request_status: { open: open_requests, closed: closed_requests },
-            grouped_by_table // Return this for the new section
-        };
-    }
-
-    function drawDashboard(processedData, rawData) {
-        // 1. KPIs
-        document.getElementById('total-calls').textContent = processedData.total_calls;
-        document.getElementById('open-requests').textContent = processedData.open_requests;
-        document.getElementById('avg-respond').textContent = processedData.avg_respond;
-        document.getElementById('avg-delivery').textContent = processedData.avg_delivery;
-
-        // 2. LIVE STATUS (ENLARGED)
-        const liveContainer = document.getElementById('live-status-cards');
-        liveContainer.innerHTML = '';
-        if (rawData.live_status && rawData.live_status.length > 0) {
-            rawData.live_status.sort((a, b) => a.table_id - b.table_id);
-            rawData.live_status.forEach(status => {
-                const card = document.createElement('div');
-                const statusClass = getStatusClass(status.last_event);
-                const displayText = status.last_event.replace('_', ' ').split('💰')[0].trim();
-                
-                card.className = `live-status-card ${statusClass}`;
-                card.innerHTML = `
-                    <h4>Table ${status.table_id}</h4>
-                    <p class="status-text">${displayText}</p>
-                    <p class="time-text">Updated ${status.minutes_ago}m ago</p>
-                `;
-                liveContainer.appendChild(card);
-            });
-        } else {
-            liveContainer.innerHTML = '<p>No active tables found.</p>';
+            'total': "0", 'open': "0", 'avg_resp': "0.0", 'avg_dlv': "0.0",
+            'hourly': {i: 0 for i in range(24)}, 'closed': 0
         }
 
-        // 3. INDIVIDUAL TABLE LOGS (NEW)
-        const tableContainer = document.getElementById('individual-tables-container');
-        tableContainer.innerHTML = '';
-        const groupData = processedData.grouped_by_table;
+    logs_df['timestamp'] = pd.to_datetime(logs_df['timestamp'])
+    
+    total = 0
+    closed_req = 0
+    resp_times = []
+    dlv_times = []
+    hourly = {i: 0 for i in range(24)}
+    
+    # Process per table
+    tables = logs_df.groupby('table_id')
+    
+    for tid, group in tables:
+        events = group.sort_values('timestamp').to_dict('records')
+        call_start = None
         
-        Object.keys(groupData).sort((a,b) => a - b).forEach(tableId => {
-            const card = document.createElement('div');
-            card.className = 'table-history-card';
+        for e in events:
+            evt = e['event']
+            ts = e['timestamp']
             
-            let rows = groupData[tableId].slice(-5).map(log => // Show last 5 events only
-                `<tr>
-                    <td>${log.event.replace('_', ' ')}</td>
-                    <td>${log.jsDate.toLocaleTimeString()}</td>
-                </tr>`
-            ).join('');
+            if evt == "Customer_Called":
+                total += 1
+                call_start = ts
+                h = ts.hour
+                hourly[h] = hourly.get(h, 0) + 1
+            elif evt == "Waiter_Responded" and call_start:
+                diff = (ts - call_start).total_seconds() / 60
+                resp_times.append(diff)
+            elif (evt == "Food_Delivered" or "Bill" in evt) and call_start:
+                diff = (ts - call_start).total_seconds() / 60
+                dlv_times.append(diff)
+                call_start = None
+                closed_req += 1
 
-            card.innerHTML = `
-                <h4 style="margin-top:0; color:#B5A642;">Table ${tableId} History</h4>
-                <table class="mini-table">
-                    <thead><tr><th>Event</th><th>Time</th></tr></thead>
-                    <tbody>${rows}</tbody>
-                </table>
-            `;
-            tableContainer.appendChild(card);
-        });
+    avg_resp = sum(resp_times)/len(resp_times) if resp_times else 0
+    avg_dlv = sum(dlv_times)/len(dlv_times) if dlv_times else 0
 
-        // 4. CHARTS
-        if (currentCharts.calls) currentCharts.calls.destroy();
-        if (currentCharts.status) currentCharts.status.destroy();
-
-        const ctx1 = document.getElementById('calls-per-hour-chart').getContext('2d');
-        currentCharts.calls = new Chart(ctx1, {
-            type: 'line',
-            data: {
-                labels: Object.keys(processedData.calls_per_hour),
-                datasets: [{ 
-                    label: 'Calls', data: Object.values(processedData.calls_per_hour),
-                    borderColor: '#B5A642', backgroundColor: 'rgba(181, 166, 66, 0.2)', fill: true
-                }]
-            }
-        });
-
-        const ctx2 = document.getElementById('request-status-chart').getContext('2d');
-        currentCharts.status = new Chart(ctx2, {
-            type: 'pie',
-            data: {
-                labels: ['Open', 'Closed'],
-                datasets: [{
-                    data: [processedData.request_status.open, processedData.request_status.closed],
-                    backgroundColor: ['#F6B84F', '#B5A642']
-                }]
-            }
-        });
+    return {
+        'total': str(total),
+        'open': str(total - closed_req),
+        'closed': closed_req,
+        'avg_resp': f"{avg_resp:.1f}",
+        'avg_dlv': f"{avg_dlv:.1f}",
+        'hourly': hourly
     }
 
-    function fetchData() {
-        // Uses the API_BASE_URL variable
-        fetch(`${API_BASE_URL}/data`)
-            .then(res => res.json())
-            .then(data => {
-                const processed = processDataFromRecords(data.records);
-                drawDashboard(processed, data);
-                updateClock();
+@app.route('/log', methods=['POST', 'GET'])
+def log_data():
+    data = request.get_json(silent=True) or request.args
+    table_id = data.get('tableId') or data.get('table')
+    event = data.get('event')
+
+    if not table_id or not event:
+        return jsonify({"status": "error"}), 400
+
+    entry = CallLog(table_id=int(table_id), event=event)
+    db.session.add(entry)
+    db.session.commit()
+    return jsonify({"status": "success"}), 200
+
+@app.route('/data')
+def get_data():
+    try:
+        logs_df = pd.read_sql_table('call_log', db.engine)
+        analytics = calculate_analytics(logs_df)
+    except Exception as e:
+        print(e)
+        logs_df = pd.DataFrame()
+        analytics = calculate_analytics(logs_df)
+
+    # Live Status Calculation
+    live_status = []
+    if not logs_df.empty:
+        latest = logs_df.sort_values('timestamp').drop_duplicates(subset='table_id', keep='last')
+        now = datetime.now()
+        for _, r in latest.iterrows():
+            last_event = r['event']
+            # Determine if table is effectively idle
+            status_display = last_event
+            if last_event in ['Food_Delivered', 'Table_Closed 💰 Bill']:
+                status_display = "Idle"
+            
+            last_time = r['timestamp'].to_pydatetime()
+            minutes_ago = int((now - last_time).total_seconds() / 60)
+            
+            live_status.append({
+                'table_id': int(r['table_id']),
+                'status': status_display,
+                'minutes_ago': minutes_ago
             })
-            .catch(err => console.error("Fetch error:", err));
-    }
+            
+    return jsonify({'analytics': analytics, 'live_status': live_status})
 
-    document.addEventListener('DOMContentLoaded', () => {
-        fetchData();
-        setInterval(fetchData, 5000);
-    });
-    </script>
-</body>
-</html>
+if __name__ == "__main__":
+    with app.app_context():
+        db.create_all()
+    print("--- SERVER RUNNING ---")
+    print("Use 'ipconfig' (Windows) to find your IPv4 Address.")
+    serve(app, host='0.0.0.0', port=5000, threads=6)
